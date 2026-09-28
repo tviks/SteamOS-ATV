@@ -1,0 +1,12 @@
+#!/bin/bash
+set -u
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+systemctl stop waydroid-atv16-mdns.service waydroid-atv16-remote-6466.service waydroid-atv16-remote-6467.service || true
+if [[ -r /run/waydroid-atv16/remote-owned-rules ]]; then
+    while IFS=$'\t' read -r zone rule; do
+        [[ -n $zone && -n $rule ]] || continue
+        firewall-cmd -q --zone="$zone" --remove-rich-rule="$rule" || true
+    done < /run/waydroid-atv16/remote-owned-rules
+    rm -f /run/waydroid-atv16/remote-owned-rules
+fi
+rm -f /run/waydroid-atv16/remote-network

@@ -1,0 +1,1 @@
+deck ALL=(root) NOPASSWD: /etc/waydroid-atv16/control check, /etc/waydroid-atv16/control start, /etc/waydroid-atv16/control stop, /etc/waydroid-atv16/control input

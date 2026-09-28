@@ -1,0 +1,74 @@
+#!/bin/bash
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+unset LD_LIBRARY_PATH LD_PRELOAD PYTHONPATH PYTHONHOME
+state=/home/deck/Android_Waydroid_ATV16/var-lib-waydroid
+target=/var/lib/waydroid
+runtime=/run/waydroid-atv16
+export XDG_DATA_HOME=/home/deck/.local/share/waydroid-atv16
+[[ $EUID == 0 && $# == 1 ]] || exit 2
+case "$1" in check|start|stop|input) ;; *) exit 2 ;; esac
+exec 9>/run/lock/waydroid-atv16-control.lock
+flock -w 15 9
+owns_mount() {
+    mountpoint -q "$target" && [[ $(stat -Lc '%d:%i' "$target") == "$(stat -Lc '%d:%i' "$state")" ]]
+}
+check_mount() {
+    if mountpoint -q "$target"; then
+        owns_mount || { echo 'Another Android environment is running; close it first.' >&2; exit 1; }
+    elif systemctl is-active --quiet waydroid-container.service; then
+        echo 'An Android container is active without the TV mount.' >&2
+        exit 1
+    fi
+}
+stop_tv() {
+    owns_mount || return 0
+    /etc/waydroid-atv16/remote-stop
+    systemctl stop waydroid-atv16-controller.service || true
+    systemctl stop waydroid-container.service
+    umount -R "$target"
+    if [[ -r "$runtime/pid_max" ]]; then
+        saved=$(<"$runtime/pid_max")
+        [[ $saved =~ ^[0-9]+$ ]] && sysctl -qw "kernel.pid_max=$saved"
+        rm -f "$runtime/pid_max"
+    fi
+}
+case "$1" in
+    check) check_mount ;;
+    stop) check_mount; stop_tv ;;
+    input)
+        owns_mount || exit 1
+        # Android TV's RemoteService creates its keyboard through uinput.
+        # Waydroid does not expose that node by default; grant only Android system access.
+        [[ -c /dev/uinput ]] || modprobe uinput
+        read -r uinput_major uinput_minor < <(stat -c '%t %T' /dev/uinput)
+        uinput_major=$((16#$uinput_major))
+        uinput_minor=$((16#$uinput_minor))
+        waydroid shell -- sh -c "test -c /dev/uinput || mknod /dev/uinput c $uinput_major $uinput_minor; chown 1000:1000 /dev/uinput; chmod 660 /dev/uinput"
+        for event in /sys/devices/virtual/input/input*/event*/uevent; do
+            [[ ! -w $event ]] || printf 'add\n' > "$event"
+        done
+        if ! systemctl is-active --quiet waydroid-atv16-controller.service; then
+            systemd-run --unit=waydroid-atv16-controller --collect /etc/waydroid-atv16/controller-hotplug
+        fi
+        /etc/waydroid-atv16/remote-start
+        ;;
+    start)
+        check_mount
+        [[ -s $state/waydroid.cfg && -s $state/images/system.img && -s $state/images/vendor.img ]]
+        owns_mount && stop_tv
+        # Use the root-owned host integration's Binder provisioning functions.
+        source /usr/bin/waydroid-mount
+        validate_binder
+        mkdir -p "$target" "$runtime"
+        mount --bind "$state" "$target"
+        trap 'stop_tv' ERR
+        /usr/bin/waydroid upgrade -o
+        cat /proc/sys/kernel/pid_max > "$runtime/pid_max"
+        sysctl -qw kernel.pid_max=65535
+        systemctl start firewalld.service
+        firewall-cmd -q --zone=trusted --add-interface=waydroid0
+        systemctl restart waydroid-container.service
+        trap - ERR
+        ;;
+esac

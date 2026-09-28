@@ -1,0 +1,34 @@
+#!/bin/bash
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+export XDG_DATA_HOME=/home/deck/.local/share/waydroid-atv16
+unset LD_LIBRARY_PATH LD_PRELOAD PYTHONPATH PYTHONHOME
+lan_cidr=$(ip -4 -o addr show wlan0 | awk '{print $4; exit}')
+[[ -n $lan_cidr ]] || { echo 'Google TV remote: Wi-Fi has no IPv4 address.' >&2; exit 0; }
+lan_ip=${lan_cidr%/*}
+subnet=$(python3 -c 'import ipaddress,sys; print(ipaddress.ip_interface(sys.argv[1]).network)' "$lan_cidr")
+android_ip=$(waydroid status | awk '/IP address:/{print $3}')
+[[ $android_ip =~ ^192\.168\.240\.[0-9]+$ ]] || exit 0
+zone=$(firewall-cmd --get-zone-of-interface=wlan0)
+[[ -n $zone && $zone != 'no zone' ]] || zone=$(firewall-cmd --get-default-zone)
+mkdir -p /run/waydroid-atv16
+add_owned_rule() {
+    local rule=$1
+    if ! firewall-cmd -q --zone="$zone" --query-rich-rule="$rule"; then
+        firewall-cmd -q --zone="$zone" --add-rich-rule="$rule"
+        printf '%s\t%s\n' "$zone" "$rule" >> /run/waydroid-atv16/remote-owned-rules
+    fi
+}
+for port in 6466 6467; do
+    add_owned_rule "rule family=ipv4 source address=$subnet port port=$port protocol=tcp accept"
+    if ! systemctl is-active --quiet "waydroid-atv16-remote-$port.service"; then
+        systemd-run --unit="waydroid-atv16-remote-$port" --collect --uid=deck --property=Restart=on-failure \
+            /usr/bin/socat "TCP4-LISTEN:$port,bind=$lan_ip,reuseaddr,fork,range=$subnet" "TCP4:$android_ip:$port"
+    fi
+done
+add_owned_rule "rule family=ipv4 source address=$subnet port port=5353 protocol=udp accept"
+if ! systemctl is-active --quiet waydroid-atv16-mdns.service; then
+    systemd-run --unit=waydroid-atv16-mdns --collect --uid=deck --property=Restart=on-failure \
+        /usr/bin/python3 /etc/waydroid-atv16/mdns.py "$lan_ip"
+fi
+printf '%s\n%s\n' "$zone" "$subnet" > /run/waydroid-atv16/remote-network

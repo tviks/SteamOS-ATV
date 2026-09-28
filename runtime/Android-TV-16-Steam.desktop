@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Android TV 16
+Exec=/home/deck/Android-TV-16-Steam.sh
+Path=/home/deck
+Icon=applications-multimedia
+Terminal=false
+Categories=AudioVideo;
